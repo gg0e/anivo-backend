@@ -1,11 +1,24 @@
 # -*- coding: utf-8 -*-
+# =====================================================
+# ANIVO Backend - Fixed Version
+# الإصلاحات:
+# 1. نقل جميع الـ imports للأعلى (حل مشكلة urllib not defined)
+# 2. إزالة import requests المكرر
+# 3. تخفيض timeout الـ AniList من 10s إلى 5s لتفادي timeout الـ worker
+# 4. تنظيف عام للكود
+# =====================================================
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
-import cloudscraper
-from bs4 import BeautifulSoup
+import urllib.parse
+import base64
+import json
 import re
 import logging
+
+import cloudscraper
+from bs4 import BeautifulSoup
+from curl_cffi import requests as cf_requests
 
 # استيراد دوال قاعدة البيانات
 from database import get_anime_details, save_anime_details, get_stream_link, save_stream_link, search_anime_by_title
@@ -23,7 +36,7 @@ def get_headers():
     }
 
 # ==========================================
-# مسار 1: استخراج تفاصيل الأنمي (الآن متصل بقاعدة البيانات)
+# مسار 1: استخراج تفاصيل الأنمي
 # ==========================================
 @app.route('/api/anime-details', methods=['GET'])
 def get_anime_details_route():
@@ -31,16 +44,13 @@ def get_anime_details_route():
     if not url:
         return jsonify({"success": False, "error": "يرجى إرسال رابط الأنمي"}), 400
 
-    # 1. البحث في قاعدة البيانات أولاً (الرد في ملي ثانية!)
+    # 1. البحث في قاعدة البيانات أولاً
     db_result = get_anime_details(url)
     if db_result:
         logging.info(f"[DB HIT] جلب البيانات من MongoDB: {url}")
-        return jsonify({
-            "success": True,
-            "data": db_result
-        })
+        return jsonify({"success": True, "data": db_result})
 
-    # 2. خط الدفاع الثاني (Fallback): إذا لم يجده في قاعدة البيانات (لم يسحبه الـ Worker بعد)
+    # 2. Fallback: سحب مباشر
     logging.info(f"[LIVE FETCH] الأنمي غير موجود بالقاعدة، سيتم سحبه فوراً: {url}")
     try:
         response = scraper.get(url, timeout=10)
@@ -71,13 +81,8 @@ def get_anime_details_route():
             "episodes": episodes_list
         }
 
-        # حفظ النتيجة في MongoDB فوراً لتتوفر للمستخدم التالي
         save_anime_details(url, result_data)
-
-        return jsonify({
-            "success": True,
-            "data": result_data
-        })
+        return jsonify({"success": True, "data": result_data})
 
     except Exception as e:
         logging.error(f"[ERROR] خطأ أثناء جلب التفاصيل: {str(e)}")
@@ -85,23 +90,37 @@ def get_anime_details_route():
 
 
 # ==========================================
-# مسار إضافي: البحث عن حلقات الأنمي بالاسم
+# دوال مساعدة لـ Witanime API
 # ==========================================
 
-import requests
-from curl_cffi import requests as cf_requests
-
 def fetch_witanime_api(api_url):
+    """
+    جلب بيانات من Witanime API باستخدام curl_cffi مباشرة (بدون allorigins proxy)
+    curl_cffi يتجاوز حماية Cloudflare بتقليد متصفح Chrome حقيقي
+    """
     try:
-        resp = cf_requests.get(api_url, impersonate="chrome110", timeout=15)
+        resp = cf_requests.get(
+            api_url,
+            impersonate="chrome110",
+            timeout=15,
+            headers={"Accept": "application/json"}
+        )
         if resp.status_code == 200:
             return resp.json()
+        else:
+            logging.warning(f"[Witanime API] Status {resp.status_code} for: {api_url}")
     except Exception as e:
-        logging.error(f"curl_cffi fetch error: {e}")
+        logging.error(f"[Witanime API] Fetch error: {e}")
     return []
 
+
 def search_witanime_api(title, romaji_title=None):
+    """
+    البحث عن الأنمي في Witanime مع ترجمة الاسم عبر AniList أولاً
+    """
     search_query = romaji_title or title
+
+    # محاولة ترجمة الاسم عبر AniList (timeout مخفض إلى 5 ثوانٍ)
     try:
         query = '''
         query ($s: String) {
@@ -110,7 +129,11 @@ def search_witanime_api(title, romaji_title=None):
           }
         }
         '''
-        anilist_resp = requests.post('https://graphql.anilist.co', json={'query': query, 'variables': {'s': title}}, timeout=10)
+        anilist_resp = requests.post(
+            'https://graphql.anilist.co',
+            json={'query': query, 'variables': {'s': title}},
+            timeout=5   # ← تم تخفيض من 10s إلى 5s
+        )
         if anilist_resp.status_code == 200:
             data = anilist_resp.json()
             anilist_romaji = data.get('data', {}).get('Media', {}).get('title', {}).get('romaji')
@@ -120,15 +143,17 @@ def search_witanime_api(title, romaji_title=None):
     except Exception as e:
         logging.warning(f"⚠️ AniList API failed: {e}")
 
-    import urllib.parse
+    # البحث في Witanime API
     url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
     anime_list = fetch_witanime_api(url)
-    
+
+    # محاولة ثانية بأول 3 كلمات
     if not anime_list:
         short_query = " ".join(search_query.split()[:3])
         url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
         anime_list = fetch_witanime_api(url)
 
+    # محاولة ثالثة بالاسم الإنجليزي الأصلي
     if not anime_list and search_query != title:
         eng_short_query = " ".join(title.split()[:3])
         url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
@@ -138,17 +163,21 @@ def search_witanime_api(title, romaji_title=None):
         return anime_list[0]
     return None
 
+
+# ==========================================
+# مسار 2: البحث عن حلقات الأنمي بالاسم
+# ==========================================
 @app.route('/api/search-and-get-episodes', methods=['GET'])
 def search_and_get_episodes():
     title = request.args.get('title', '')
     romaji = request.args.get('romaji', '')
-    
+
     if not title and not romaji:
         return jsonify({"success": False, "error": "يرجى توفير اسم الأنمي أو الروماجي"}), 400
 
-    # 1. البحث في MongoDB
+    # 1. البحث في MongoDB أولاً
     db_result = search_anime_by_title(title, romaji)
-    
+
     if db_result and 'episodes' in db_result:
         logging.info(f"[DB HIT] تم العثور على الأنمي بالبحث: {title or romaji}")
         return jsonify({
@@ -158,22 +187,21 @@ def search_and_get_episodes():
                 "episodes": db_result.get("episodes", [])
             }
         })
-    
-    # 2. خط الدفاع الثاني (Live Fallback) من Witanime API
+
+    # 2. Live Fallback من Witanime API
     logging.info(f"[LIVE FETCH] جاري البحث المباشر في Witanime عن: {title or romaji}")
     try:
-        search_query = romaji or title
         target = search_witanime_api(title, romaji)
-            
+
         if target:
             anime_id = target.get('id')
             anime_title = target.get('title', {}).get('rendered', '') or target.get('name', '')
             anime_link = target.get('link', '')
-            
+
             # جلب الحلقات
             ep_url = f"https://witanime.you/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
             ep_data = fetch_witanime_api(ep_url)
-            
+
             episodes_list = []
             for ep in ep_data:
                 episodes_list.append({
@@ -181,34 +209,28 @@ def search_and_get_episodes():
                     "url": ep.get('link', '')
                 })
             episodes_list.reverse()
-            
+
             result_data = {
                 "title": anime_title,
                 "episodes": episodes_list
             }
-            
-            # حفظ في قاعدة البيانات فوراً
+
+            # حفظ في قاعدة البيانات
             save_anime_details(anime_link, result_data)
-            
             logging.info(f"✅ تم السحب المباشر وحفظ: {anime_title}")
-            return jsonify({
-                "success": True,
-                "data": result_data
-            })
+
+            return jsonify({"success": True, "data": result_data})
         else:
             logging.warning(f"[MISSING] الأنمي غير موجود في قاعدة البيانات ولا في Witanime: {title or romaji}")
             return jsonify({"success": False, "error": "الأنمي غير متوفر في السيرفر حالياً."}), 404
-            
+
     except Exception as e:
         logging.error(f"[ERROR] خطأ أثناء البحث المباشر: {str(e)}")
         return jsonify({"success": False, "error": "خطأ في الاتصال بالمصدر."}), 500
 
 
-import base64
-import json
-
 # ==========================================
-# مسار 2: استخراج سيرفرات المشاهدة (Witanime Logic)
+# مسار 3: استخراج سيرفرات المشاهدة
 # ==========================================
 @app.route('/api/extract-stream', methods=['GET'])
 def extract_stream():
@@ -226,53 +248,49 @@ def extract_stream():
             "stream_url": db_stream.get("stream_url")
         })
 
-    # 2. الاستخراج الحي (Witanime Base64 Decoder)
+    # 2. الاستخراج الحي
     logging.info(f"[LIVE EXTRACT] بدء فك تشفير سيرفرات Witanime: {episode_url}")
     try:
         response = scraper.get(episode_url, timeout=15)
         html = response.text
-        
+
         servers = []
         scripts = re.findall(r'<script.*?</script>', html, re.DOTALL | re.IGNORECASE)
         for s in scripts:
-             if '_zG' in s and '_zH' in s:
-                 zG_match = re.search(r'var _zG=\"([^\"]+)\"', s)
-                 zH_match = re.search(r'var _zH=\"([^\"]+)\"', s)
-                 if zG_match and zH_match:
-                     resourceRegistry = json.loads(base64.b64decode(zG_match.group(1)).decode('utf-8'))
-                     configRegistry = json.loads(base64.b64decode(zH_match.group(1)).decode('utf-8'))
-                     
-                     for i in range(len(resourceRegistry)):
-                         resourceData = resourceRegistry[i]
-                         configSettings = configRegistry[i]
-                         
-                         resourceData = resourceData[::-1]
-                         resourceData = re.sub(r'[^A-Za-z0-9+/=]', '', resourceData)
-                         
-                         indexKey = int(base64.b64decode(configSettings['k']).decode('utf-8'))
-                         paramOffset = configSettings['d'][indexKey]
-                         
-                         decoded = base64.b64decode(resourceData).decode('utf-8')
-                         if paramOffset > 0:
-                             decoded = decoded[:-paramOffset]
-                             
-                         # التأكد من أنه رابط iframe صالح أو رابط فيديو
-                         if 'http' in decoded or '//' in decoded:
-                             servers.append(decoded)
-                             
+            if '_zG' in s and '_zH' in s:
+                zG_match = re.search(r'var _zG=\"([^\"]+)\"', s)
+                zH_match = re.search(r'var _zH=\"([^\"]+)\"', s)
+                if zG_match and zH_match:
+                    resourceRegistry = json.loads(base64.b64decode(zG_match.group(1)).decode('utf-8'))
+                    configRegistry = json.loads(base64.b64decode(zH_match.group(1)).decode('utf-8'))
+
+                    for i in range(len(resourceRegistry)):
+                        resourceData = resourceRegistry[i]
+                        configSettings = configRegistry[i]
+
+                        resourceData = resourceData[::-1]
+                        resourceData = re.sub(r'[^A-Za-z0-9+/=]', '', resourceData)
+
+                        indexKey = int(base64.b64decode(configSettings['k']).decode('utf-8'))
+                        paramOffset = configSettings['d'][indexKey]
+
+                        decoded = base64.b64decode(resourceData).decode('utf-8')
+                        if paramOffset > 0:
+                            decoded = decoded[:-paramOffset]
+
+                        if 'http' in decoded or '//' in decoded:
+                            servers.append(decoded)
+
         if servers:
-            # نأخذ أول سيرفر كسيرفر أساسي
             best_embed = servers[0]
-            # بعض السيرفرات تأتي بدون http
             if best_embed.startswith('//'):
                 best_embed = 'https:' + best_embed
-                
-            # حفظ في MongoDB
+
             save_stream_link(episode_url, {
                 "embed_url": best_embed,
-                "stream_url": None # الـ iframe سيعمل مباشرة
+                "stream_url": None
             })
-            
+
             return jsonify({
                 "success": True,
                 "embed_url": best_embed,
@@ -285,6 +303,7 @@ def extract_stream():
     except Exception as e:
         logging.error(f"[ERROR] فشل فك التشفير: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
+
 
 if __name__ == '__main__':
     print("🚀 Anivo MongoDB Backend Server is RUNNING on port 5000...")
