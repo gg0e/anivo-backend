@@ -2,10 +2,23 @@ import express from 'express';
 import cors from 'cors';
 import NodeCache from 'node-cache';
 import axios from 'axios';
-import { searchAndGetEpisodes as witanimeSearch, extractStream as witanimeExtract } from './scrapers/witanime.js';
-import { searchAndGetEpisodes as animeslayerSearch, extractStream as animeslayerExtract } from './scrapers/animeslayer.js';
-import connectDB from './database/db.js';
-import Anime from './database/models/Anime.js';
+import mongoose from 'mongoose';
+import { searchAndGetEpisodes as witanimeSearch, extractStream as witanimeExtract } from './witanime.js';
+import connectDB from './db.js';
+
+const episodeSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    url: { type: String, required: true },
+    number: { type: Number }
+}, { _id: false });
+
+const animeSchema = new mongoose.Schema({
+    title: { type: String, required: true, unique: true, index: true },
+    romaji: { type: String },
+    episodes: [episodeSchema]
+}, { timestamps: true });
+
+const Anime = mongoose.model('Anime', animeSchema);
 
 // Connect to MongoDB
 connectDB();
@@ -44,12 +57,6 @@ app.get('/api/search-and-get-episodes', async (req, res) => {
 
         console.log(`[Server] Not found in DB. Searching for: ${title} in Witanime...`);
         let result = await witanimeSearch(title, romaji);
-
-        // نظام (Multi-Source): إذا لم يجد الأنمي في Witanime، يبحث في AnimeSlayer
-        if (!result || result.episodes.length === 0) {
-            console.log(`[Server] Witanime failed or returned empty. Trying AnimeSlayer...`);
-            result = await animeslayerSearch(title);
-        }
 
         if (result && result.episodes.length > 0) {
             // حفظ البيانات الجديدة في قاعدة البيانات للمستقبل
@@ -91,14 +98,9 @@ app.get('/api/extract-stream', async (req, res) => {
     try {
         let out;
         
-        // التوجيه الذكي (Smart Routing) بناءً على رابط الحلقة
-        if (url.includes('animeslayer.to')) {
-            console.log(`[Server] Routing to AnimeSlayer Extractor -> ${url}`);
-            out = await animeslayerExtract(url);
-        } else {
-            console.log(`[Server] Routing to Witanime Extractor -> ${url}`);
-            out = await witanimeExtract(url);
-        }
+        // التوجيه المباشر إلى Witanime
+        console.log(`[Server] Routing to Witanime Extractor -> ${url}`);
+        out = await witanimeExtract(url);
 
         if (out && out.success) {
             // Check if the stream needs proxying to bypass hotlinking protection
