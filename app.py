@@ -7,10 +7,10 @@ import base64
 import json
 import re
 import logging
+import concurrent.futures
 
 import cloudscraper
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cf_requests
 
 from database import get_anime_details, save_anime_details, get_stream_link, save_stream_link, search_anime_by_title
 
@@ -18,12 +18,6 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 scraper = cloudscraper.create_scraper()
-
-WITANIME_DOMAINS = [
-    "https://witanime.you",
-    "https://witanime.cyou",
-    "https://witanime.club",
-]
 
 # ==========================================
 # مسار 1: استخراج تفاصيل الأنمي
@@ -75,52 +69,47 @@ def get_anime_details_route():
 
 def fetch_witanime_api(path):
     """
-    يجرب عدة طرق وعدة دومينات:
-    1. requests مباشر (بدون proxy) — يشتغل على .you
-    2. cloudscraper
-    3. allorigins.win proxy
+    يطلق 4 proxy services بالتوازي في نفس الوقت
+    يرجع أول نتيجة ناجحة — إذا allorigins بطيء وcodetabs سريع يرجع codetabs
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Referer": "https://witanime.cyou/"
-    }
+    target_url = f"https://witanime.cyou{path}"
 
-    for domain in WITANIME_DOMAINS:
-        api_url = f"{domain}{path}"
+    proxy_urls = [
+        f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}",
+        f"https://api.codetabs.com/v1/proxy?quest={urllib.parse.quote(target_url)}",
+        f"https://thingproxy.freeboard.io/fetch/{target_url}",
+        f"https://corsproxy.io/?{urllib.parse.quote(target_url)}",
+    ]
 
-        # محاولة 1: طلب مباشر بسيط
+    def try_proxy(proxy_url):
         try:
-            resp = requests.get(api_url, headers=headers, timeout=12)
-            if resp.status_code == 200 and resp.text.strip().startswith('['):
-                logging.info(f"[Witanime] ✅ Direct success: {domain}")
-                return resp.json()
-            logging.warning(f"[Witanime] Direct status {resp.status_code}: {domain}")
-        except Exception as e:
-            logging.warning(f"[Witanime] Direct failed ({domain}): {e}")
+            resp = requests.get(
+                proxy_url,
+                timeout=20,
+                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+            )
+            text = resp.text.strip()
+            if resp.status_code == 200 and text.startswith('[') and len(text) > 5:
+                data = resp.json()
+                if isinstance(data, list):
+                    logging.info(f"[Witanime] ✅ {proxy_url.split('?')[0].split('/')[-1] or 'proxy'} success")
+                    return data
+        except Exception:
+            pass
+        return None
 
-        # محاولة 2: cloudscraper
-        try:
-            resp = scraper.get(api_url, headers=headers, timeout=12)
-            if resp.status_code == 200 and resp.text.strip().startswith('['):
-                logging.info(f"[Witanime] ✅ Cloudscraper success: {domain}")
-                return resp.json()
-            logging.warning(f"[Witanime] Cloudscraper status {resp.status_code}: {domain}")
-        except Exception as e:
-            logging.warning(f"[Witanime] Cloudscraper failed ({domain}): {e}")
+    # أطلق كل الـ proxies بالتوازي — يرجع أول واحد ينجح
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(try_proxy, p): p for p in proxy_urls}
+        for future in concurrent.futures.as_completed(futures, timeout=25):
+            try:
+                result = future.result()
+                if result is not None:
+                    return result
+            except Exception:
+                pass
 
-    # محاولة 3: allorigins.win proxy (يعمل لكن بطيء)
-    primary_url = f"{WITANIME_DOMAINS[1]}{path}"
-    try:
-        proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(primary_url)}"
-        resp = requests.get(proxy_url, timeout=25)
-        if resp.status_code == 200 and resp.text.strip().startswith('['):
-            logging.info(f"[Witanime] ✅ allorigins success")
-            return resp.json()
-        logging.warning(f"[Witanime] allorigins status: {resp.status_code}")
-    except Exception as e:
-        logging.warning(f"[Witanime] allorigins failed: {e}")
-
+    logging.warning(f"[Witanime] ❌ كل الـ proxies فشلت لـ: {path}")
     return []
 
 
@@ -149,21 +138,24 @@ def search_witanime_api(title, romaji_title=None):
     except Exception as e:
         logging.warning(f"⚠️ AniList API failed: {e}")
 
-    path = f"/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
-    anime_list = fetch_witanime_api(path)
-
-    if not anime_list:
-        short_query = " ".join(search_query.split()[:3])
-        path = f"/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
-        anime_list = fetch_witanime_api(path)
-
-    if not anime_list and search_query != title:
-        eng_short_query = " ".join(title.split()[:3])
-        path = f"/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
-        anime_list = fetch_witanime_api(path)
-
+    # محاولة 1: الاسم الكامل
+    anime_list = fetch_witanime_api(f"/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}")
     if anime_list:
         return anime_list[0]
+
+    # محاولة 2: أول 3 كلمات
+    short_query = " ".join(search_query.split()[:3])
+    anime_list = fetch_witanime_api(f"/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}")
+    if anime_list:
+        return anime_list[0]
+
+    # محاولة 3: الاسم الإنجليزي الأصلي
+    if search_query != title:
+        eng_short = " ".join(title.split()[:3])
+        anime_list = fetch_witanime_api(f"/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short)}")
+        if anime_list:
+            return anime_list[0]
+
     return None
 
 
@@ -198,8 +190,7 @@ def search_and_get_episodes():
             anime_title = target.get('title', {}).get('rendered', '') or target.get('name', '')
             anime_link = target.get('link', '')
 
-            ep_path = f"/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
-            ep_data = fetch_witanime_api(ep_path)
+            ep_data = fetch_witanime_api(f"/wp-json/wp/v2/episode?anime={anime_id}&per_page=100")
 
             episodes_list = []
             for ep in ep_data:
