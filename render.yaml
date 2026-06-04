@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: anivo-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+
+  - type: worker
+    name: anivo-worker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
