@@ -7,3 +7,4 @@ schedule==1.2.1
 gunicorn==21.2.0
 cloudscraper==1.2.71
 certifi==2023.7.22
+curl_cffi>=0.14.0

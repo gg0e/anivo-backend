@@ -88,6 +88,18 @@ def get_anime_details_route():
 # مسار إضافي: البحث عن حلقات الأنمي بالاسم
 # ==========================================
 
+import requests
+from curl_cffi import requests as cf_requests
+
+def fetch_witanime_api(api_url):
+    try:
+        resp = cf_requests.get(api_url, impersonate="chrome110", timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logging.error(f"curl_cffi fetch error: {e}")
+    return []
+
 def search_witanime_api(title, romaji_title=None):
     search_query = romaji_title or title
     try:
@@ -109,33 +121,18 @@ def search_witanime_api(title, romaji_title=None):
         logging.warning(f"⚠️ AniList API failed: {e}")
 
     import urllib.parse
-    import json
-    
-    def fetch_via_proxy(api_url):
-        proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(api_url)}"
-        try:
-            resp = requests.get(proxy_url, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                contents = data.get('contents')
-                if contents and "Just a moment" not in contents:
-                    return json.loads(contents)
-        except Exception as e:
-            logging.error(f"Proxy fetch error: {e}")
-        return []
-
     url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
-    anime_list = fetch_via_proxy(url)
+    anime_list = fetch_witanime_api(url)
     
     if not anime_list:
         short_query = " ".join(search_query.split()[:3])
         url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
-        anime_list = fetch_via_proxy(url)
+        anime_list = fetch_witanime_api(url)
 
     if not anime_list and search_query != title:
         eng_short_query = " ".join(title.split()[:3])
         url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
-        anime_list = fetch_via_proxy(url)
+        anime_list = fetch_witanime_api(url)
 
     if anime_list:
         return anime_list[0]
@@ -175,16 +172,7 @@ def search_and_get_episodes():
             
             # جلب الحلقات
             ep_url = f"https://witanime.you/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
-            try:
-                ep_proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(ep_url)}"
-                ep_res = requests.get(ep_proxy_url, timeout=15)
-                if ep_res.status_code == 200:
-                    ep_data = json.loads(ep_res.json().get('contents', '[]'))
-                else:
-                    ep_data = []
-            except Exception as e:
-                logging.error(f"Episode fetch error: {e}")
-                ep_data = []
+            ep_data = fetch_witanime_api(ep_url)
             
             episodes_list = []
             for ep in ep_data:
