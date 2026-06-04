@@ -76,7 +76,7 @@ def fetch_witanime_api(api_url):
     """
     headers = {
         "Accept": "application/json",
-        "Referer": "https://witanime.you/"
+        "Referer": "https://witanime.cyou/"
     }
 
     # محاولة 1: cloudscraper
@@ -135,17 +135,17 @@ def search_witanime_api(title, romaji_title=None):
     except Exception as e:
         logging.warning(f"⚠️ AniList API failed: {e}")
 
-    url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
+    url = f"https://witanime.cyou/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
     anime_list = fetch_witanime_api(url)
 
     if not anime_list:
         short_query = " ".join(search_query.split()[:3])
-        url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
+        url = f"https://witanime.cyou/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
         anime_list = fetch_witanime_api(url)
 
     if not anime_list and search_query != title:
         eng_short_query = " ".join(title.split()[:3])
-        url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
+        url = f"https://witanime.cyou/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
         anime_list = fetch_witanime_api(url)
 
     if anime_list:
@@ -184,7 +184,7 @@ def search_and_get_episodes():
             anime_title = target.get('title', {}).get('rendered', '') or target.get('name', '')
             anime_link = target.get('link', '')
 
-            ep_url = f"https://witanime.you/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
+            ep_url = f"https://witanime.cyou/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
             ep_data = fetch_witanime_api(ep_url)
 
             episodes_list = []
