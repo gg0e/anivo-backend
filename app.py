@@ -1,12 +1,4 @@
 # -*- coding: utf-8 -*-
-# =====================================================
-# ANIVO Backend - Fixed Version
-# الإصلاحات:
-# 1. نقل جميع الـ imports للأعلى (حل مشكلة urllib not defined)
-# 2. إزالة import requests المكرر
-# 3. تخفيض timeout الـ AniList من 10s إلى 5s لتفادي timeout الـ worker
-# 4. تنظيف عام للكود
-# =====================================================
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
@@ -20,20 +12,12 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cf_requests
 
-# استيراد دوال قاعدة البيانات
 from database import get_anime_details, save_anime_details, get_stream_link, save_stream_link, search_anime_by_title
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 scraper = cloudscraper.create_scraper()
-
-def get_headers():
-    return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-    }
 
 # ==========================================
 # مسار 1: استخراج تفاصيل الأنمي
@@ -44,13 +28,11 @@ def get_anime_details_route():
     if not url:
         return jsonify({"success": False, "error": "يرجى إرسال رابط الأنمي"}), 400
 
-    # 1. البحث في قاعدة البيانات أولاً
     db_result = get_anime_details(url)
     if db_result:
         logging.info(f"[DB HIT] جلب البيانات من MongoDB: {url}")
         return jsonify({"success": True, "data": db_result})
 
-    # 2. Fallback: سحب مباشر
     logging.info(f"[LIVE FETCH] الأنمي غير موجود بالقاعدة، سيتم سحبه فوراً: {url}")
     try:
         response = scraper.get(url, timeout=10)
@@ -69,18 +51,10 @@ def get_anime_details_route():
         episodes_list = []
         ep_links = soup.select('.episodes-card-container .episodes-card-title a')
         for ep in ep_links:
-            episodes_list.append({
-                "title": ep.text.strip(),
-                "url": ep.get('href')
-            })
+            episodes_list.append({"title": ep.text.strip(), "url": ep.get('href')})
         episodes_list.reverse()
 
-        result_data = {
-            "title": title,
-            "thumbnail": thumbnail,
-            "episodes": episodes_list
-        }
-
+        result_data = {"title": title, "thumbnail": thumbnail, "episodes": episodes_list}
         save_anime_details(url, result_data)
         return jsonify({"success": True, "data": result_data})
 
@@ -95,32 +69,50 @@ def get_anime_details_route():
 
 def fetch_witanime_api(api_url):
     """
-    جلب بيانات من Witanime API باستخدام curl_cffi مباشرة (بدون allorigins proxy)
-    curl_cffi يتجاوز حماية Cloudflare بتقليد متصفح Chrome حقيقي
+    3 محاولات لتجاوز Cloudflare 403:
+    1. cloudscraper  (يقلد متصفح حقيقي)
+    2. curl_cffi chrome124
+    3. corsproxy.io  (fallback أخير)
     """
+    headers = {
+        "Accept": "application/json",
+        "Referer": "https://witanime.you/"
+    }
+
+    # محاولة 1: cloudscraper
     try:
-        resp = cf_requests.get(
-            api_url,
-            impersonate="chrome110",
-            timeout=15,
-            headers={"Accept": "application/json"}
-        )
+        resp = scraper.get(api_url, timeout=12, headers=headers)
         if resp.status_code == 200:
             return resp.json()
-        else:
-            logging.warning(f"[Witanime API] Status {resp.status_code} for: {api_url}")
+        logging.warning(f"[Witanime] cloudscraper status: {resp.status_code}")
     except Exception as e:
-        logging.error(f"[Witanime API] Fetch error: {e}")
+        logging.warning(f"[Witanime] cloudscraper failed: {e}")
+
+    # محاولة 2: curl_cffi chrome124
+    try:
+        resp = cf_requests.get(api_url, impersonate="chrome124", timeout=12, headers=headers)
+        if resp.status_code == 200:
+            return resp.json()
+        logging.warning(f"[Witanime] curl_cffi status: {resp.status_code}")
+    except Exception as e:
+        logging.warning(f"[Witanime] curl_cffi failed: {e}")
+
+    # محاولة 3: corsproxy.io
+    try:
+        proxy_url = f"https://corsproxy.io/?{urllib.parse.quote(api_url)}"
+        resp = requests.get(proxy_url, timeout=12, headers={"Accept": "application/json"})
+        if resp.status_code == 200:
+            return resp.json()
+        logging.warning(f"[Witanime] corsproxy status: {resp.status_code}")
+    except Exception as e:
+        logging.warning(f"[Witanime] corsproxy failed: {e}")
+
     return []
 
 
 def search_witanime_api(title, romaji_title=None):
-    """
-    البحث عن الأنمي في Witanime مع ترجمة الاسم عبر AniList أولاً
-    """
     search_query = romaji_title or title
 
-    # محاولة ترجمة الاسم عبر AniList (timeout مخفض إلى 5 ثوانٍ)
     try:
         query = '''
         query ($s: String) {
@@ -132,7 +124,7 @@ def search_witanime_api(title, romaji_title=None):
         anilist_resp = requests.post(
             'https://graphql.anilist.co',
             json={'query': query, 'variables': {'s': title}},
-            timeout=5   # ← تم تخفيض من 10s إلى 5s
+            timeout=5
         )
         if anilist_resp.status_code == 200:
             data = anilist_resp.json()
@@ -143,17 +135,14 @@ def search_witanime_api(title, romaji_title=None):
     except Exception as e:
         logging.warning(f"⚠️ AniList API failed: {e}")
 
-    # البحث في Witanime API
     url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
     anime_list = fetch_witanime_api(url)
 
-    # محاولة ثانية بأول 3 كلمات
     if not anime_list:
         short_query = " ".join(search_query.split()[:3])
         url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
         anime_list = fetch_witanime_api(url)
 
-    # محاولة ثالثة بالاسم الإنجليزي الأصلي
     if not anime_list and search_query != title:
         eng_short_query = " ".join(title.split()[:3])
         url = f"https://witanime.you/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
@@ -175,9 +164,7 @@ def search_and_get_episodes():
     if not title and not romaji:
         return jsonify({"success": False, "error": "يرجى توفير اسم الأنمي أو الروماجي"}), 400
 
-    # 1. البحث في MongoDB أولاً
     db_result = search_anime_by_title(title, romaji)
-
     if db_result and 'episodes' in db_result:
         logging.info(f"[DB HIT] تم العثور على الأنمي بالبحث: {title or romaji}")
         return jsonify({
@@ -188,7 +175,6 @@ def search_and_get_episodes():
             }
         })
 
-    # 2. Live Fallback من Witanime API
     logging.info(f"[LIVE FETCH] جاري البحث المباشر في Witanime عن: {title or romaji}")
     try:
         target = search_witanime_api(title, romaji)
@@ -198,7 +184,6 @@ def search_and_get_episodes():
             anime_title = target.get('title', {}).get('rendered', '') or target.get('name', '')
             anime_link = target.get('link', '')
 
-            # جلب الحلقات
             ep_url = f"https://witanime.you/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
             ep_data = fetch_witanime_api(ep_url)
 
@@ -210,12 +195,7 @@ def search_and_get_episodes():
                 })
             episodes_list.reverse()
 
-            result_data = {
-                "title": anime_title,
-                "episodes": episodes_list
-            }
-
-            # حفظ في قاعدة البيانات
+            result_data = {"title": anime_title, "episodes": episodes_list}
             save_anime_details(anime_link, result_data)
             logging.info(f"✅ تم السحب المباشر وحفظ: {anime_title}")
 
@@ -238,7 +218,6 @@ def extract_stream():
     if not episode_url:
         return jsonify({"success": False, "error": "يرجى توفير رابط الحلقة"}), 400
 
-    # 1. التحقق من التخزين في قاعدة البيانات
     db_stream = get_stream_link(episode_url)
     if db_stream:
         logging.info(f"[DB HIT] تقديم سيرفر المشاهدة من MongoDB: {episode_url}")
@@ -248,7 +227,6 @@ def extract_stream():
             "stream_url": db_stream.get("stream_url")
         })
 
-    # 2. الاستخراج الحي
     logging.info(f"[LIVE EXTRACT] بدء فك تشفير سيرفرات Witanime: {episode_url}")
     try:
         response = scraper.get(episode_url, timeout=15)
@@ -286,10 +264,7 @@ def extract_stream():
             if best_embed.startswith('//'):
                 best_embed = 'https:' + best_embed
 
-            save_stream_link(episode_url, {
-                "embed_url": best_embed,
-                "stream_url": None
-            })
+            save_stream_link(episode_url, {"embed_url": best_embed, "stream_url": None})
 
             return jsonify({
                 "success": True,
