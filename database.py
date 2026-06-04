@@ -1,5 +1,6 @@
 from pymongo import MongoClient
 import logging
+import certifi
 
 # إعداد الـ Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,7 +33,7 @@ def update_crawler_state(page):
 
 # إنشاء الاتصال
 try:
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
     # تحديد قاعدة البيانات (سيتم إنشاؤها تلقائياً إذا لم تكن موجودة)
     db = client['anivo_database']
     
