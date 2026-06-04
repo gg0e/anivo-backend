@@ -2,6 +2,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import re
 import logging
@@ -12,6 +13,7 @@ from database import get_anime_details, save_anime_details, get_stream_link, sav
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+scraper = cloudscraper.create_scraper()
 
 def get_headers():
     return {
@@ -41,7 +43,7 @@ def get_anime_details_route():
     # 2. خط الدفاع الثاني (Fallback): إذا لم يجده في قاعدة البيانات (لم يسحبه الـ Worker بعد)
     logging.info(f"[LIVE FETCH] الأنمي غير موجود بالقاعدة، سيتم سحبه فوراً: {url}")
     try:
-        response = requests.get(url, headers=get_headers(), timeout=10)
+        response = scraper.get(url, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
 
         thumbnail = ""
@@ -112,8 +114,11 @@ def search_and_get_episodes():
         return jsonify({"success": False, "error": "الأنمي غير متوفر في السيرفر حالياً."}), 404
 
 
+import base64
+import json
+
 # ==========================================
-# مسار 2: استخراج رابط المشاهدة (m3u8)
+# مسار 2: استخراج سيرفرات المشاهدة (Witanime Logic)
 # ==========================================
 @app.route('/api/extract-stream', methods=['GET'])
 def extract_stream():
@@ -124,58 +129,71 @@ def extract_stream():
     # 1. التحقق من التخزين في قاعدة البيانات
     db_stream = get_stream_link(episode_url)
     if db_stream:
-        logging.info(f"[DB HIT] تقديم رابط البث من MongoDB: {episode_url}")
+        logging.info(f"[DB HIT] تقديم سيرفر المشاهدة من MongoDB: {episode_url}")
         return jsonify({
             "success": True,
             "embed_url": db_stream.get("embed_url"),
             "stream_url": db_stream.get("stream_url")
         })
 
-    # 2. الاستخراج الحي إذا لم يكن موجوداً
-    logging.info(f"[LIVE EXTRACT] بدء استخراج البث: {episode_url}")
+    # 2. الاستخراج الحي (Witanime Base64 Decoder)
+    logging.info(f"[LIVE EXTRACT] بدء فك تشفير سيرفرات Witanime: {episode_url}")
     try:
-        response = requests.get(episode_url, headers=get_headers(), timeout=12)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        embed_url = None
-        server_btn = soup.find('a', text=re.compile(r'FHD', re.I)) or soup.find('a', class_=re.compile(r'server', re.I))
-        if server_btn and server_btn.get('data-url'):
-            embed_url = server_btn.get('data-url')
+        response = scraper.get(episode_url, timeout=15)
+        html = response.text
         
-        if not embed_url:
-            iframe = soup.select_one('.video-player iframe')
-            if iframe:
-                embed_url = iframe.get('src')
-
-        if not embed_url:
-            return jsonify({"success": False, "error": "لم نتمكن من العثور على مشغل الفيديو المضمن."}), 404
-
-        embed_headers = get_headers()
-        embed_headers['Referer'] = episode_url 
-        
-        embed_response = requests.get(embed_url, headers=embed_headers, timeout=12)
-        m3u8_pattern = r'https?://[^\s\'"]+\.m3u8[^\s\'"]*'
-        match = re.search(m3u8_pattern, embed_response.text)
-        stream_url = match.group(0) if match else None
-
-        if stream_url:
-            # حفظ الرابط في MongoDB
+        servers = []
+        scripts = re.findall(r'<script.*?</script>', html, re.DOTALL | re.IGNORECASE)
+        for s in scripts:
+             if '_zG' in s and '_zH' in s:
+                 zG_match = re.search(r'var _zG=\"([^\"]+)\"', s)
+                 zH_match = re.search(r'var _zH=\"([^\"]+)\"', s)
+                 if zG_match and zH_match:
+                     resourceRegistry = json.loads(base64.b64decode(zG_match.group(1)).decode('utf-8'))
+                     configRegistry = json.loads(base64.b64decode(zH_match.group(1)).decode('utf-8'))
+                     
+                     for i in range(len(resourceRegistry)):
+                         resourceData = resourceRegistry[i]
+                         configSettings = configRegistry[i]
+                         
+                         resourceData = resourceData[::-1]
+                         resourceData = re.sub(r'[^A-Za-z0-9+/=]', '', resourceData)
+                         
+                         indexKey = int(base64.b64decode(configSettings['k']).decode('utf-8'))
+                         paramOffset = configSettings['d'][indexKey]
+                         
+                         decoded = base64.b64decode(resourceData).decode('utf-8')
+                         if paramOffset > 0:
+                             decoded = decoded[:-paramOffset]
+                             
+                         # التأكد من أنه رابط iframe صالح أو رابط فيديو
+                         if 'http' in decoded or '//' in decoded:
+                             servers.append(decoded)
+                             
+        if servers:
+            # نأخذ أول سيرفر كسيرفر أساسي
+            best_embed = servers[0]
+            # بعض السيرفرات تأتي بدون http
+            if best_embed.startswith('//'):
+                best_embed = 'https:' + best_embed
+                
+            # حفظ في MongoDB
             save_stream_link(episode_url, {
-                "embed_url": embed_url,
-                "stream_url": stream_url
+                "embed_url": best_embed,
+                "stream_url": None # الـ iframe سيعمل مباشرة
             })
+            
             return jsonify({
                 "success": True,
-                "embed_url": embed_url,
-                "stream_url": stream_url
+                "embed_url": best_embed,
+                "stream_url": None,
+                "all_servers": servers
             })
         else:
-            return jsonify({
-                "success": False,
-                "error": "فشل استخراج رابط m3u8."
-            }), 404
+            return jsonify({"success": False, "error": "لم يتم العثور على سيرفرات Witanime في هذه الحلقة."}), 404
 
     except Exception as e:
+        logging.error(f"[ERROR] فشل فك التشفير: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == '__main__':

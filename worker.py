@@ -1,100 +1,102 @@
 import time
 import schedule
 import cloudscraper
-from bs4 import BeautifulSoup
 import logging
+from bs4 import BeautifulSoup
 from database import save_anime_details, get_crawler_state, update_crawler_state
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 scraper = cloudscraper.create_scraper()
+BASE_API = "https://witanime.you/wp-json/wp/v2"
 
-def scrape_anime_details(url):
-    """دالة تقوم بسحب تفاصيل الأنمي وحفظها في قاعدة البيانات مباشرة"""
-    logging.info(f"🔄 [WORKER] جاري سحب الأنمي: {url}")
+def scrape_anime_details(anime_id, anime_title, anime_link):
+    """دالة تقوم بسحب تفاصيل الأنمي وحلقاته من Witanime API"""
+    logging.info(f"🔄 [WORKER] جاري سحب الأنمي: {anime_title}")
     try:
-        response = scraper.get(url, timeout=20)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # استخراج البوستر
+        # 1. جلب الصورة (Thumbnail) من صفحة الأنمي
         thumbnail = ""
-        img_tag = soup.select_one('.thumbnail img') or soup.select_one('.poster img')
-        if img_tag:
-            thumbnail = img_tag.get('src') or img_tag.get('data-src') or ""
+        try:
+            page_res = scraper.get(anime_link, timeout=15)
+            soup = BeautifulSoup(page_res.text, 'html.parser')
+            img_tag = soup.select_one('.anime-thumbnail img') or soup.select_one('img.img-responsive')
+            if img_tag:
+                thumbnail = img_tag.get('src')
+        except Exception as img_e:
+            logging.warning(f"⚠️ تعذر جلب صورة {anime_title}: {img_e}")
 
-        # استخراج العنوان
-        title = ""
-        title_tag = soup.select_one('h1.anime-details-title') or soup.select_one('h1')
-        if title_tag:
-            title = title_tag.text.strip()
-
-        # استخراج قائمة الحلقات
-        episodes_list = []
-        ep_links = soup.select('.episodes-card-container .episodes-card-title a') or soup.select('.episode-link')
+        # 2. جلب الحلقات من الـ API
+        episodes_url = f"{BASE_API}/episode?anime={anime_id}&per_page=100"
+        ep_res = scraper.get(episodes_url, timeout=15)
+        ep_data = ep_res.json()
         
-        for ep in ep_links:
-            ep_title = ep.text.strip()
-            ep_url = ep.get('href')
+        episodes_list = []
+        for item in ep_data:
+            ep_title = item.get('title', {}).get('rendered', '')
+            ep_link = item.get('link', '')
+            # إزالة الرموز الخاصة إن وجدت
+            ep_title = ep_title.encode('ascii', errors='ignore').decode('ascii') if ep_title else "حلقة"
             episodes_list.append({
                 "title": ep_title,
-                "url": ep_url
+                "url": ep_link
             })
-
+            
+        # عادة API ووردبريس يرجع الأحدث أولاً، نعكسها لتصبح من 1 إلى الأخير
         episodes_list.reverse()
 
-        if title and episodes_list:
+        if episodes_list:
             result_data = {
-                "title": title,
+                "title": anime_title,
                 "thumbnail": thumbnail,
                 "episodes": episodes_list,
                 "last_updated": time.time()
             }
-            # حفظ في قاعدة البيانات
-            save_anime_details(url, result_data)
+            # حفظ في قاعدة البيانات (نستخدم رابط الأنمي كمفتاح)
+            save_anime_details(anime_link, result_data)
             return True
         else:
-            logging.warning(f"⚠️ [WORKER] لم يتم العثور على بيانات كافية في: {url}")
+            logging.warning(f"⚠️ [WORKER] لا توجد حلقات للأنمي: {anime_title}")
             return False
             
     except Exception as e:
-        logging.error(f"❌ [WORKER] فشل سحب الأنمي {url}: {e}")
+        logging.error(f"❌ [WORKER] فشل سحب الأنمي {anime_title}: {e}")
         return False
 
 def bulk_crawl_job():
-    logging.info("⚙️ [WORKER] بدء مهمة الزحف (Crawler) الذكية...")
+    logging.info("⚙️ [WORKER] بدء مهمة الزحف (Witanime API)...")
     current_page = get_crawler_state()
     logging.info(f"📄 جاري فحص الصفحة رقم: {current_page}")
     
-    list_url = f"https://blkom.com/anime-list?page={current_page}"
+    list_url = f"{BASE_API}/anime?per_page=20&page={current_page}"
     try:
         response = scraper.get(list_url, timeout=20)
-        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # استخراج روابط الأنمي من القائمة
-        links = soup.select('a')
-        anime_urls = []
-        for a in links:
-            href = a.get('href', '')
-            # الأنميات عادة تكون تحت مسار /anime/ أو /watch/
-            if '/anime/' in href and href not in anime_urls:
-                if href.startswith('/'):
-                    href = "https://blkom.com" + href
-                anime_urls.append(href)
-        
-        # تحديد 20 أنمي فقط لكل جلسة تفادياً للحظر
-        anime_urls = anime_urls[:20]
-        
-        if not anime_urls:
-            logging.warning("⚠️ [WORKER] لم يتم العثور على أنميات في هذه الصفحة. ربما وصلنا للنهاية أو الموقع غير التصميم.")
-            # العودة للصفحة الأولى إذا وصلنا للنهاية
+        if response.status_code != 200:
+            logging.warning(f"⚠️ [WORKER] الصفحة {current_page} غير موجودة أو خطأ في API. سنعود للصفحة 1.")
             update_crawler_state(1)
             return
             
-        logging.info(f"🔍 تم العثور على {len(anime_urls)} أنمي في هذه الصفحة. جاري السحب...")
+        animes = response.json()
         
-        for url in anime_urls:
-            scrape_anime_details(url)
-            time.sleep(3) # انتظار 3 ثوانٍ بين كل أنمي (تفادياً للحظر)
+        if not animes:
+            logging.warning("⚠️ [WORKER] لا يوجد المزيد من الأنميات. سنعود للصفحة 1.")
+            update_crawler_state(1)
+            return
+            
+        logging.info(f"🔍 تم العثور على {len(animes)} أنمي في هذه الصفحة. جاري السحب...")
+        
+        for anime in animes:
+            anime_id = anime.get('id')
+            # استخراج العنوان
+            title = anime.get('title', {}).get('rendered', '') if 'title' in anime else anime.get('name', '')
+            # تنظيف العنوان
+            title = title.encode('ascii', errors='ignore').decode('ascii')
+            
+            anime_link = anime.get('link', '')
+            
+            if anime_id and anime_link:
+                scrape_anime_details(anime_id, title, anime_link)
+                time.sleep(2) # انتظار 2 ثانية بين كل أنمي لتخفيف الضغط
             
         # الانتقال للصفحة التالية للمرة القادمة
         next_page = current_page + 1
@@ -105,7 +107,7 @@ def bulk_crawl_job():
         logging.error(f"❌ [WORKER] فشل الزحف على قائمة الأنمي: {e}")
 
 if __name__ == '__main__':
-    logging.info("🚀 تشغيل الزاحف الذكي (Smart Crawler)...")
+    logging.info("🚀 تشغيل زاحف Witanime...")
     
     # تشغيل المهمة فوراً عند البدء
     bulk_crawl_job()
