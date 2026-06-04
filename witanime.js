@@ -47,20 +47,43 @@ export async function searchAndGetEpisodes(title, romajiTitle = null) {
             console.warn("⚠️ AniList API failed, using fallback.");
         }
         
+        async function fetchWitanimeApi(url) {
+            try {
+                let r = await axios.get(url, { 
+                    timeout: 15000,
+                    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
+                });
+                return r.data;
+            } catch (err) {
+                if (err.response && (err.response.status === 403 || err.response.status === 503)) {
+                    console.log(`[Cloudflare Blocked Axios] Using Puppeteer fallback for: ${url}`);
+                    const browser = await puppeteer.launch({ headless: "new", args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+                    const page = await browser.newPage();
+                    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    const content = await page.evaluate(() => document.body.innerText);
+                    await browser.close();
+                    try {
+                        return JSON.parse(content);
+                    } catch(e) {
+                        return [];
+                    }
+                }
+                throw err;
+            }
+        }
+        
         console.log(`[Witanime Fast] Searching for: ${searchQuery}`);
         
-        let searchResp = await axios.get(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(searchQuery)}`, { timeout: 15000 });
-        let animeList = searchResp.data;
+        let animeList = await fetchWitanimeApi(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(searchQuery)}`);
         
         if (!animeList || animeList.length === 0) {
             let shortQuery = searchQuery.split(" ").slice(0, 3).join(" ");
-            searchResp = await axios.get(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(shortQuery)}`, { timeout: 15000 });
-            animeList = searchResp.data;
+            animeList = await fetchWitanimeApi(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(shortQuery)}`);
             
             if ((!animeList || animeList.length === 0) && searchQuery !== title) {
                 let engShortQuery = title.split(" ").slice(0, 3).join(" ");
-                searchResp = await axios.get(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(engShortQuery)}`, { timeout: 15000 });
-                animeList = searchResp.data;
+                animeList = await fetchWitanimeApi(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(engShortQuery)}`);
             }
             
             if (!animeList || animeList.length === 0) {
