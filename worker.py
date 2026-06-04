@@ -1,41 +1,36 @@
 import time
 import schedule
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import logging
-from database import save_anime_details
+from database import save_anime_details, get_crawler_state, update_crawler_state
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def get_headers():
-    return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-    }
+scraper = cloudscraper.create_scraper()
 
-def scrape_anime(url):
+def scrape_anime_details(url):
     """دالة تقوم بسحب تفاصيل الأنمي وحفظها في قاعدة البيانات مباشرة"""
     logging.info(f"🔄 [WORKER] جاري سحب الأنمي: {url}")
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = scraper.get(url, timeout=20)
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # استخراج البوستر
         thumbnail = ""
-        img_tag = soup.select_one('.thumbnail img')
+        img_tag = soup.select_one('.thumbnail img') or soup.select_one('.poster img')
         if img_tag:
             thumbnail = img_tag.get('src') or img_tag.get('data-src') or ""
 
         # استخراج العنوان
         title = ""
-        title_tag = soup.select_one('h1.anime-details-title')
+        title_tag = soup.select_one('h1.anime-details-title') or soup.select_one('h1')
         if title_tag:
             title = title_tag.text.strip()
 
         # استخراج قائمة الحلقات
         episodes_list = []
-        ep_links = soup.select('.episodes-card-container .episodes-card-title a')
+        ep_links = soup.select('.episodes-card-container .episodes-card-title a') or soup.select('.episode-link')
         
         for ep in ep_links:
             ep_title = ep.text.strip()
@@ -47,40 +42,76 @@ def scrape_anime(url):
 
         episodes_list.reverse()
 
-        result_data = {
-            "title": title,
-            "thumbnail": thumbnail,
-            "episodes": episodes_list,
-            "last_updated": time.time()
-        }
-
-        # حفظ في قاعدة البيانات
-        save_anime_details(url, result_data)
-        return True
+        if title and episodes_list:
+            result_data = {
+                "title": title,
+                "thumbnail": thumbnail,
+                "episodes": episodes_list,
+                "last_updated": time.time()
+            }
+            # حفظ في قاعدة البيانات
+            save_anime_details(url, result_data)
+            return True
+        else:
+            logging.warning(f"⚠️ [WORKER] لم يتم العثور على بيانات كافية في: {url}")
+            return False
+            
     except Exception as e:
         logging.error(f"❌ [WORKER] فشل سحب الأنمي {url}: {e}")
         return False
 
-# قائمة الأنميات التي يراقبها النظام (مؤقتاً للبرهنة)
-WATCHLIST = [
-    # يمكنك وضع روابط الأنميات هنا ليقوم النظام بمراقبتها وتحديثها يومياً
-]
-
-def job():
-    logging.info("⚙️ [WORKER] بدء مهمة السحب الخلفية...")
-    for url in WATCHLIST:
-        scrape_anime(url)
-        time.sleep(3) # الانتظار بين الطلبات لتجنب الحظر
-    logging.info("✅ [WORKER] انتهت مهمة السحب بنجاح.")
+def bulk_crawl_job():
+    logging.info("⚙️ [WORKER] بدء مهمة الزحف (Crawler) الذكية...")
+    current_page = get_crawler_state()
+    logging.info(f"📄 جاري فحص الصفحة رقم: {current_page}")
+    
+    list_url = f"https://blkom.com/anime-list?page={current_page}"
+    try:
+        response = scraper.get(list_url, timeout=20)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # استخراج روابط الأنمي من القائمة
+        links = soup.select('a')
+        anime_urls = []
+        for a in links:
+            href = a.get('href', '')
+            # الأنميات عادة تكون تحت مسار /anime/ أو /watch/
+            if '/anime/' in href and href not in anime_urls:
+                if href.startswith('/'):
+                    href = "https://blkom.com" + href
+                anime_urls.append(href)
+        
+        # تحديد 20 أنمي فقط لكل جلسة تفادياً للحظر
+        anime_urls = anime_urls[:20]
+        
+        if not anime_urls:
+            logging.warning("⚠️ [WORKER] لم يتم العثور على أنميات في هذه الصفحة. ربما وصلنا للنهاية أو الموقع غير التصميم.")
+            # العودة للصفحة الأولى إذا وصلنا للنهاية
+            update_crawler_state(1)
+            return
+            
+        logging.info(f"🔍 تم العثور على {len(anime_urls)} أنمي في هذه الصفحة. جاري السحب...")
+        
+        for url in anime_urls:
+            scrape_anime_details(url)
+            time.sleep(3) # انتظار 3 ثوانٍ بين كل أنمي (تفادياً للحظر)
+            
+        # الانتقال للصفحة التالية للمرة القادمة
+        next_page = current_page + 1
+        update_crawler_state(next_page)
+        logging.info(f"✅ [WORKER] انتهت جلسة الزحف. سيتم سحب الصفحة {next_page} في الجلسة القادمة.")
+        
+    except Exception as e:
+        logging.error(f"❌ [WORKER] فشل الزحف على قائمة الأنمي: {e}")
 
 if __name__ == '__main__':
-    logging.info("🚀 تشغيل نظام السحب الخلفي (Worker) المستقل...")
+    logging.info("🚀 تشغيل الزاحف الذكي (Smart Crawler)...")
     
     # تشغيل المهمة فوراً عند البدء
-    job()
+    bulk_crawl_job()
     
-    # جدولة المهمة لتعمل كل ساعة
-    schedule.every(1).hours.do(job)
+    # الجدولة: سحب صفحة واحدة (20 أنمي) كل 10 دقائق
+    schedule.every(10).minutes.do(bulk_crawl_job)
     
     while True:
         schedule.run_pending()

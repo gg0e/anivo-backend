@@ -7,6 +7,29 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # رابط الاتصال بقاعدة البيانات الذي قدمته سابقاً
 MONGO_URI = "mongodb+srv://mismero:Neno1900@cluster0.lrd7lz9.mongodb.net/?appName=Cluster0"
 
+# ==========================================
+# 3. إدارة الزاحف (Crawler State)
+# ==========================================
+def get_crawler_state():
+    try:
+        state = db.crawler_state.find_one({"_id": "blkom"})
+        if state:
+            return state.get("last_page", 1)
+        return 1
+    except Exception as e:
+        print(f"Error fetching crawler state: {e}")
+        return 1
+
+def update_crawler_state(page):
+    try:
+        db.crawler_state.update_one(
+            {"_id": "blkom"},
+            {"$set": {"last_page": page}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"Error updating crawler state: {e}")
+
 # إنشاء الاتصال
 try:
     client = MongoClient(MONGO_URI)
