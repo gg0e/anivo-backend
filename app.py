@@ -19,6 +19,12 @@ CORS(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 scraper = cloudscraper.create_scraper()
 
+WITANIME_DOMAINS = [
+    "https://witanime.you",
+    "https://witanime.cyou",
+    "https://witanime.club",
+]
+
 # ==========================================
 # مسار 1: استخراج تفاصيل الأنمي
 # ==========================================
@@ -67,45 +73,53 @@ def get_anime_details_route():
 # دوال مساعدة لـ Witanime API
 # ==========================================
 
-def fetch_witanime_api(api_url):
+def fetch_witanime_api(path):
     """
-    3 محاولات لتجاوز Cloudflare 403:
-    1. cloudscraper  (يقلد متصفح حقيقي)
-    2. curl_cffi chrome124
-    3. corsproxy.io  (fallback أخير)
+    يجرب عدة طرق وعدة دومينات:
+    1. requests مباشر (بدون proxy) — يشتغل على .you
+    2. cloudscraper
+    3. allorigins.win proxy
     """
     headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Referer": "https://witanime.cyou/"
     }
 
-    # محاولة 1: cloudscraper
-    try:
-        resp = scraper.get(api_url, timeout=12, headers=headers)
-        if resp.status_code == 200:
-            return resp.json()
-        logging.warning(f"[Witanime] cloudscraper status: {resp.status_code}")
-    except Exception as e:
-        logging.warning(f"[Witanime] cloudscraper failed: {e}")
+    for domain in WITANIME_DOMAINS:
+        api_url = f"{domain}{path}"
 
-    # محاولة 2: curl_cffi chrome124
-    try:
-        resp = cf_requests.get(api_url, impersonate="chrome124", timeout=12, headers=headers)
-        if resp.status_code == 200:
-            return resp.json()
-        logging.warning(f"[Witanime] curl_cffi status: {resp.status_code}")
-    except Exception as e:
-        logging.warning(f"[Witanime] curl_cffi failed: {e}")
+        # محاولة 1: طلب مباشر بسيط
+        try:
+            resp = requests.get(api_url, headers=headers, timeout=12)
+            if resp.status_code == 200 and resp.text.strip().startswith('['):
+                logging.info(f"[Witanime] ✅ Direct success: {domain}")
+                return resp.json()
+            logging.warning(f"[Witanime] Direct status {resp.status_code}: {domain}")
+        except Exception as e:
+            logging.warning(f"[Witanime] Direct failed ({domain}): {e}")
 
-    # محاولة 3: corsproxy.io
+        # محاولة 2: cloudscraper
+        try:
+            resp = scraper.get(api_url, headers=headers, timeout=12)
+            if resp.status_code == 200 and resp.text.strip().startswith('['):
+                logging.info(f"[Witanime] ✅ Cloudscraper success: {domain}")
+                return resp.json()
+            logging.warning(f"[Witanime] Cloudscraper status {resp.status_code}: {domain}")
+        except Exception as e:
+            logging.warning(f"[Witanime] Cloudscraper failed ({domain}): {e}")
+
+    # محاولة 3: allorigins.win proxy (يعمل لكن بطيء)
+    primary_url = f"{WITANIME_DOMAINS[1]}{path}"
     try:
-        proxy_url = f"https://corsproxy.io/?{urllib.parse.quote(api_url)}"
-        resp = requests.get(proxy_url, timeout=12, headers={"Accept": "application/json"})
-        if resp.status_code == 200:
+        proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(primary_url)}"
+        resp = requests.get(proxy_url, timeout=25)
+        if resp.status_code == 200 and resp.text.strip().startswith('['):
+            logging.info(f"[Witanime] ✅ allorigins success")
             return resp.json()
-        logging.warning(f"[Witanime] corsproxy status: {resp.status_code}")
+        logging.warning(f"[Witanime] allorigins status: {resp.status_code}")
     except Exception as e:
-        logging.warning(f"[Witanime] corsproxy failed: {e}")
+        logging.warning(f"[Witanime] allorigins failed: {e}")
 
     return []
 
@@ -135,18 +149,18 @@ def search_witanime_api(title, romaji_title=None):
     except Exception as e:
         logging.warning(f"⚠️ AniList API failed: {e}")
 
-    url = f"https://witanime.cyou/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
-    anime_list = fetch_witanime_api(url)
+    path = f"/wp-json/wp/v2/anime?search={urllib.parse.quote(search_query)}"
+    anime_list = fetch_witanime_api(path)
 
     if not anime_list:
         short_query = " ".join(search_query.split()[:3])
-        url = f"https://witanime.cyou/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
-        anime_list = fetch_witanime_api(url)
+        path = f"/wp-json/wp/v2/anime?search={urllib.parse.quote(short_query)}"
+        anime_list = fetch_witanime_api(path)
 
     if not anime_list and search_query != title:
         eng_short_query = " ".join(title.split()[:3])
-        url = f"https://witanime.cyou/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
-        anime_list = fetch_witanime_api(url)
+        path = f"/wp-json/wp/v2/anime?search={urllib.parse.quote(eng_short_query)}"
+        anime_list = fetch_witanime_api(path)
 
     if anime_list:
         return anime_list[0]
@@ -184,8 +198,8 @@ def search_and_get_episodes():
             anime_title = target.get('title', {}).get('rendered', '') or target.get('name', '')
             anime_link = target.get('link', '')
 
-            ep_url = f"https://witanime.cyou/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
-            ep_data = fetch_witanime_api(ep_url)
+            ep_path = f"/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
+            ep_data = fetch_witanime_api(ep_path)
 
             episodes_list = []
             for ep in ep_data:
@@ -201,7 +215,7 @@ def search_and_get_episodes():
 
             return jsonify({"success": True, "data": result_data})
         else:
-            logging.warning(f"[MISSING] الأنمي غير موجود في قاعدة البيانات ولا في Witanime: {title or romaji}")
+            logging.warning(f"[MISSING] الأنمي غير موجود: {title or romaji}")
             return jsonify({"success": False, "error": "الأنمي غير متوفر في السيرفر حالياً."}), 404
 
     except Exception as e:
@@ -245,17 +259,13 @@ def extract_stream():
                     for i in range(len(resourceRegistry)):
                         resourceData = resourceRegistry[i]
                         configSettings = configRegistry[i]
-
                         resourceData = resourceData[::-1]
                         resourceData = re.sub(r'[^A-Za-z0-9+/=]', '', resourceData)
-
                         indexKey = int(base64.b64decode(configSettings['k']).decode('utf-8'))
                         paramOffset = configSettings['d'][indexKey]
-
                         decoded = base64.b64decode(resourceData).decode('utf-8')
                         if paramOffset > 0:
                             decoded = decoded[:-paramOffset]
-
                         if 'http' in decoded or '//' in decoded:
                             servers.append(decoded)
 
@@ -263,9 +273,7 @@ def extract_stream():
             best_embed = servers[0]
             if best_embed.startswith('//'):
                 best_embed = 'https:' + best_embed
-
             save_stream_link(episode_url, {"embed_url": best_embed, "stream_url": None})
-
             return jsonify({
                 "success": True,
                 "embed_url": best_embed,
