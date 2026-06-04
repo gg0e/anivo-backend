@@ -107,11 +107,51 @@ def search_and_get_episodes():
                 "episodes": db_result.get("episodes", [])
             }
         })
-    else:
-        # إذا لم يتم العثور عليه في قاعدة البيانات، يجب على الـ Worker سحبه لاحقاً
-        # لكن في الوقت الحالي سنعيد خطأ لعدم وجوده في السيرفر الجديد
-        logging.warning(f"[MISSING] الأنمي غير موجود في قاعدة البيانات: {title or romaji}")
-        return jsonify({"success": False, "error": "الأنمي غير متوفر في السيرفر حالياً."}), 404
+    
+    # 2. خط الدفاع الثاني (Live Fallback) من Witanime API
+    logging.info(f"[LIVE FETCH] جاري البحث المباشر في Witanime عن: {title or romaji}")
+    try:
+        search_query = romaji or title
+        target = search_witanime_api(title, romaji)
+            
+        if target:
+            anime_id = target.get('id')
+            anime_title = target.get('title', {}).get('rendered', '') or target.get('name', '')
+            anime_link = target.get('link', '')
+            
+            # جلب الحلقات
+            ep_url = f"https://witanime.you/wp-json/wp/v2/episode?anime={anime_id}&per_page=100"
+            ep_res = scraper.get(ep_url, timeout=15)
+            ep_data = ep_res.json()
+            
+            episodes_list = []
+            for ep in ep_data:
+                episodes_list.append({
+                    "title": ep.get('title', {}).get('rendered', ''),
+                    "url": ep.get('link', '')
+                })
+            episodes_list.reverse()
+            
+            result_data = {
+                "title": anime_title,
+                "episodes": episodes_list
+            }
+            
+            # حفظ في قاعدة البيانات فوراً
+            save_anime_details(anime_link, result_data)
+            
+            logging.info(f"✅ تم السحب المباشر وحفظ: {anime_title}")
+            return jsonify({
+                "success": True,
+                "data": result_data
+            })
+        else:
+            logging.warning(f"[MISSING] الأنمي غير موجود في قاعدة البيانات ولا في Witanime: {title or romaji}")
+            return jsonify({"success": False, "error": "الأنمي غير متوفر في السيرفر حالياً."}), 404
+            
+    except Exception as e:
+        logging.error(f"[ERROR] خطأ أثناء البحث المباشر: {str(e)}")
+        return jsonify({"success": False, "error": "خطأ في الاتصال بالمصدر."}), 500
 
 
 import base64
