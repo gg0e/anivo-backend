@@ -49,17 +49,17 @@ export async function searchAndGetEpisodes(title, romajiTitle = null) {
         
         console.log(`[Witanime Fast] Searching for: ${searchQuery}`);
         
-        let searchResp = await axios.get(`https://witanime.cyou/wp-json/wp/v2/anime?search=${encodeURIComponent(searchQuery)}`, { timeout: 15000 });
+        let searchResp = await axios.get(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(searchQuery)}`, { timeout: 15000 });
         let animeList = searchResp.data;
         
         if (!animeList || animeList.length === 0) {
             let shortQuery = searchQuery.split(" ").slice(0, 3).join(" ");
-            searchResp = await axios.get(`https://witanime.cyou/wp-json/wp/v2/anime?search=${encodeURIComponent(shortQuery)}`, { timeout: 15000 });
+            searchResp = await axios.get(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(shortQuery)}`, { timeout: 15000 });
             animeList = searchResp.data;
             
             if ((!animeList || animeList.length === 0) && searchQuery !== title) {
                 let engShortQuery = title.split(" ").slice(0, 3).join(" ");
-                searchResp = await axios.get(`https://witanime.cyou/wp-json/wp/v2/anime?search=${encodeURIComponent(engShortQuery)}`, { timeout: 15000 });
+                searchResp = await axios.get(`https://witanime.you/wp-json/wp/v2/anime?search=${encodeURIComponent(engShortQuery)}`, { timeout: 15000 });
                 animeList = searchResp.data;
             }
             
@@ -71,7 +71,7 @@ export async function searchAndGetEpisodes(title, romajiTitle = null) {
         let targetAnime = animeList[0]; 
         let animeId = targetAnime.id;
         
-        let epResp = await axios.get(`https://witanime.cyou/wp-json/wp/v2/episode?anime=${animeId}&per_page=100`, { timeout: 15000 });
+        let epResp = await axios.get(`https://witanime.you/wp-json/wp/v2/episode?anime=${animeId}&per_page=100`, { timeout: 15000 });
         let episodesData = epResp.data;
         
         let episodesList = [];
@@ -176,7 +176,7 @@ export async function extractStream(episodeUrl) {
 
             // Use native referer option instead of setExtraHTTPHeaders to avoid ERR_BLOCKED_BY_CLIENT on arabic URLs
             try {
-                await page.goto(embedUrl, { referer: "https://witanime.cyou/", waitUntil: 'domcontentloaded', timeout: 30000 });
+                await page.goto(embedUrl, { referer: "https://witanime.you/", waitUntil: 'domcontentloaded', timeout: 30000 });
             } catch (gotoErr) {
                 console.log(`[Witanime Extractor] Failed to load page ${embedUrl}: ${gotoErr.message}`);
                 await page.close();
