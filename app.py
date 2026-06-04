@@ -87,6 +87,51 @@ def get_anime_details_route():
 # ==========================================
 # مسار إضافي: البحث عن حلقات الأنمي بالاسم
 # ==========================================
+
+def search_witanime_api(title, romaji_title=None):
+    search_query = romaji_title or title
+    try:
+        query = '''
+        query ($s: String) {
+          Media(search: $s, type: ANIME) {
+            title { romaji }
+          }
+        }
+        '''
+        anilist_resp = requests.post('https://graphql.anilist.co', json={'query': query, 'variables': {'s': title}}, timeout=10)
+        if anilist_resp.status_code == 200:
+            data = anilist_resp.json()
+            anilist_romaji = data.get('data', {}).get('Media', {}).get('title', {}).get('romaji')
+            if anilist_romaji:
+                search_query = anilist_romaji
+                logging.info(f"[AniList] Translated title to: {search_query}")
+    except Exception as e:
+        logging.warning(f"⚠️ AniList API failed: {e}")
+
+    url = f"https://witanime.you/wp-json/wp/v2/anime?search={requests.utils.quote(search_query)}"
+    try:
+        resp = scraper.get(url, timeout=15)
+        if resp.status_code == 200:
+            anime_list = resp.json()
+            
+            if not anime_list:
+                short_query = " ".join(search_query.split()[:3])
+                url = f"https://witanime.you/wp-json/wp/v2/anime?search={requests.utils.quote(short_query)}"
+                resp = scraper.get(url, timeout=15)
+                anime_list = resp.json() if resp.status_code == 200 else []
+
+            if not anime_list and search_query != title:
+                eng_short_query = " ".join(title.split()[:3])
+                url = f"https://witanime.you/wp-json/wp/v2/anime?search={requests.utils.quote(eng_short_query)}"
+                resp = scraper.get(url, timeout=15)
+                anime_list = resp.json() if resp.status_code == 200 else []
+
+            if anime_list:
+                return anime_list[0]
+    except Exception as e:
+        logging.error(f"Error in search_witanime_api: {e}")
+    return None
+
 @app.route('/api/search-and-get-episodes', methods=['GET'])
 def search_and_get_episodes():
     title = request.args.get('title', '')
