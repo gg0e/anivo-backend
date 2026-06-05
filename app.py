@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import requests
 import urllib.parse
@@ -8,6 +8,7 @@ import json
 import re
 import logging
 import concurrent.futures
+import os
 
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -22,6 +23,17 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 scraper = cloudscraper.create_scraper()
+
+@app.route('/')
+def home():
+    # محاولة عرض ملف الواجهة إذا كان موجوداً على الخادم
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    file_html = os.path.join(base_dir, 'index.html')
+    
+    if os.path.exists(file_html):
+        return send_file(file_html)
+    else:
+        return "HTML File not found! Please upload index.html to the server.", 404
 
 
 # ==========================================
